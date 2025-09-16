@@ -2,7 +2,11 @@ package logger
 
 import "go.uber.org/zap"
 
+// New returns a production zap logger configured to write to stdout.
 func New() *zap.Logger {
-    logger, _ := zap.NewProduction()
-    return logger
+	cfg := zap.NewProductionConfig()
+	cfg.OutputPaths = []string{"stdout"}
+	cfg.ErrorOutputPaths = []string{"stdout"}
+	logger, _ := cfg.Build()
+	return logger
 }

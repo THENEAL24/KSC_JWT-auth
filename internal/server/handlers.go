@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
-	"user-service/internal/db"
 	"user-service/internal/auth"
+	"user-service/internal/db"
 
 	"github.com/jackc/pgconn"
 	"go.uber.org/zap"
@@ -24,9 +25,10 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
-// makeRegisterHandler создает пользователя, возвращает JWT
-func makeRegisterHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
+// MakeRegisterHandler создает пользователя, возвращает JWT
+func MakeRegisterHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		logger.Info("register request", zap.String("method", r.Method), zap.String("path", r.URL.Path))
 		// Разрешаем только POST
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -120,9 +122,10 @@ func makeRegisterHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 	}
 }
 
-// makeLoginHandler логинит пользователя и возвращает JWT
-func makeLoginHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
+// MakeLoginHandler логинит пользователя и возвращает JWT
+func MakeLoginHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		logger.Info("login request", zap.String("method", r.Method), zap.String("path", r.URL.Path))
 		// Разрешаем только POST
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -184,9 +187,10 @@ func makeLoginHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 	}
 }
 
-// makeMeHandler возвращает инфо о пользователе по claims из контекста
-func makeMeHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
+// MakeMeHandler возвращает инфо о пользователе по claims из контекста
+func MakeMeHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		logger.Info("me request", zap.String("method", r.Method), zap.String("path", r.URL.Path))
 		// Извлекаем claims безопасно
 		val := r.Context().Value("claims")
 		if val == nil {
@@ -200,7 +204,7 @@ func makeMeHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 			return
 		}
 
-		// Аккуратно парсим user_id (поддерживаем float64 и string)
+		// Аккуратно парсим user_id (поддерживаем float64 и т.д.)
 		var userID int32
 		if uidRaw, exists := claims["user_id"]; exists {
 			switch v := uidRaw.(type) {
@@ -252,4 +256,80 @@ func makeMeHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 
 		writeJSON(w, http.StatusOK, resp)
 	}
+}
+
+// MakeAssignRoleHandler назначает роль пользователю
+func MakeAssignRoleHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		logger.Info("assign role request", zap.String("method", r.Method), zap.String("path", r.URL.Path))
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		parts := strings.Split(strings.TrimRight(r.URL.Path, "/"), "/")
+		if len(parts) < 4 || parts[1] != "users" || parts[3] != "roles" {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		userID64, err := strconv.ParseInt(parts[2], 10, 32)
+		if err != nil || userID64 <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid user id")
+			return
+		}
+
+		val := r.Context().Value("claims")
+		claims, _ := val.(map[string]interface{})
+		if !claimsHasRole(claims, "admin") {
+			writeError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		var req struct {
+			RoleID int32 `json:"role_id"`
+		}
+		if err := dec.Decode(&req); err != nil || req.RoleID <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		ctx := r.Context()
+		if err := q.AssignRole(ctx, db.AssignRoleParams{UserID: int32(userID64), RoleID: req.RoleID}); err != nil {
+			logger.Error("failed to assign role", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+
+		writeJSON(w, http.StatusNoContent, nil)
+	}
+}
+
+func claimsHasRole(claims map[string]interface{}, role string) bool {
+	if claims == nil {
+		return false
+	}
+	raw, ok := claims["roles"]
+	if !ok {
+		return false
+	}
+	switch v := raw.(type) {
+	case []interface{}:
+		for _, r := range v {
+			if rs, ok := r.(string); ok && rs == role {
+				return true
+			}
+		}
+	case []string:
+		for _, rs := range v {
+			if rs == role {
+				return true
+			}
+		}
+	case string:
+		return v == role
+	}
+	return false
 }
