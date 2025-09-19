@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,7 +33,10 @@ func main() {
 	}
 
 	// Postgres connection
-	dsn := "postgres://postgres:postgres@localhost:5432/usersdb?sslmode=disable"
+	dsn := os.Getenv("DATABASE_URL")
+	if strings.TrimSpace(dsn) == "" {
+		dsn = "postgres://postgres:postgres@localhost:5432/usersdb?sslmode=disable"
+	}
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		logger.Fatal("failed to connect Postgres", zap.Error(err))
@@ -46,6 +51,28 @@ func main() {
 		fmt.Fprintln(w, "pong")
 	})
 
+	// Liveness probe
+	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		logger.Info("healthz", zap.String("method", r.Method), zap.String("path", r.URL.Path))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	// Readiness probe (checks DB)
+	http.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		logger.Info("readyz", zap.String("method", r.Method), zap.String("path", r.URL.Path))
+		if err := pool.Ping(r.Context()); err != nil {
+			logger.Warn("readiness failed: db ping error", zap.Error(err))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "unready", "error": "db unreachable"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
+	})
+
 	http.HandleFunc("/register", server.MakeRegisterHandler(queries, logger))
 	http.HandleFunc("/login", server.MakeLoginHandler(queries, logger))
 
@@ -55,14 +82,18 @@ func main() {
 			logger.Info("auth middleware", zap.String("method", r.Method), zap.String("path", r.URL.Path))
 			authHeader := r.Header.Get("Authorization")
 			if strings.TrimSpace(authHeader) == "" {
-				logger.Warn("missing Authorization header")
-				http.Error(w, "missing Authorization header", http.StatusUnauthorized)
+				logger.Warn("missing Authorization header", zap.String("path", r.URL.Path))
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing Authorization header"})
 				return
 			}
 			claims, err := auth.ParseJWT(authHeader)
 			if err != nil {
-				logger.Warn("invalid token", zap.Error(err))
-				http.Error(w, "invalid token", http.StatusUnauthorized)
+				logger.Warn("invalid token", zap.Error(err), zap.String("path", r.URL.Path))
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid token"})
 				return
 			}
 			newCtx := context.WithValue(r.Context(), "claims", map[string]interface{}(claims))
@@ -73,6 +104,15 @@ func main() {
 	http.Handle("/me", authMW(http.HandlerFunc(server.MakeMeHandler(queries, logger))))
 	http.Handle("/users/", authMW(http.HandlerFunc(server.MakeAssignRoleHandler(queries, logger))))
 
-	logger.Info("starting server", zap.String("addr", ":8080"))
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	addr := ":8080"
+	if p := strings.TrimSpace(os.Getenv("PORT")); p != "" {
+		if !strings.HasPrefix(p, ":") {
+			addr = ":" + p
+		} else {
+			addr = p
+		}
+	}
+
+	logger.Info("starting server", zap.String("addr", addr))
+	log.Fatal(http.ListenAndServe(addr, nil))
 }

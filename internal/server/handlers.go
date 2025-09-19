@@ -14,7 +14,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// helper: пишет JSON-ответ с нужным статусом
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -25,17 +24,16 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
-// MakeRegisterHandler создает пользователя, возвращает JWT
 func MakeRegisterHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		logger.Info("register request", zap.String("method", r.Method), zap.String("path", r.URL.Path))
-		// Разрешаем только POST
+
 		if r.Method != http.MethodPost {
+			logger.Warn("method not allowed", zap.String("handler", "register"), zap.String("method", r.Method))
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 
-		// Ограничиваем размер тела, чтобы избежать DoS по памяти
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB
 
 		dec := json.NewDecoder(r.Body)
@@ -51,20 +49,20 @@ func MakeRegisterHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 			return
 		}
 
-		// Простая валидация
 		req.Email = strings.TrimSpace(req.Email)
 		if req.Email == "" || !strings.Contains(req.Email, "@") {
+			logger.Warn("invalid email in register", zap.String("email", req.Email))
 			writeError(w, http.StatusBadRequest, "invalid email")
 			return
 		}
 		if len(req.Password) < 6 {
+			logger.Warn("password too short in register", zap.Int("length", len(req.Password)))
 			writeError(w, http.StatusBadRequest, "password too short (min 6 chars)")
 			return
 		}
 
 		ctx := r.Context()
 
-		// Хэшируем пароль
 		hashed, err := auth.HashPassword(req.Password)
 		if err != nil {
 			logger.Error("failed to hash password", zap.Error(err))
@@ -72,13 +70,11 @@ func MakeRegisterHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 			return
 		}
 
-		// Создаем пользователя
 		user, err := q.CreateUser(ctx, db.CreateUserParams{
 			Email:    req.Email,
 			Password: hashed,
 		})
 		if err != nil {
-			// Проверяем специфическую ошибку Postgres (unique violation)
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 				logger.Info("attempt to create duplicate user", zap.String("email", req.Email))
@@ -86,7 +82,6 @@ func MakeRegisterHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 				return
 			}
 
-			// Если sql.ErrNoRows или другие ошибки — логируем и возвращаем 500
 			if errors.Is(err, sql.ErrNoRows) {
 				logger.Error("create user returned no rows", zap.Error(err))
 				writeError(w, http.StatusInternalServerError, "internal error")
@@ -98,18 +93,15 @@ func MakeRegisterHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 			return
 		}
 
-		// Получаем роли пользователя (если ничего не назначено — ставим роль по умолчанию в токене)
 		roles, err := q.GetRolesByUserId(ctx, user.ID)
 		if err != nil {
 			logger.Error("failed to get roles for new user", zap.Int32("user_id", user.ID), zap.Error(err))
-			// не фатал, но логируем и продолжаем — выдадим токен с дефолтной ролью
 			roles = []string{"user"}
 		}
 		if len(roles) == 0 {
 			roles = []string{"user"}
 		}
 
-		// Генерируем JWT
 		token, err := auth.GenerateJWT(user.ID, roles)
 		if err != nil {
 			logger.Error("failed to generate jwt", zap.Int32("user_id", user.ID), zap.Error(err))
@@ -122,17 +114,15 @@ func MakeRegisterHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 	}
 }
 
-// MakeLoginHandler логинит пользователя и возвращает JWT
 func MakeLoginHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		logger.Info("login request", zap.String("method", r.Method), zap.String("path", r.URL.Path))
-		// Разрешаем только POST
 		if r.Method != http.MethodPost {
+			logger.Warn("method not allowed", zap.String("handler", "login"), zap.String("method", r.Method))
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 
-		// Ограничиваем тело
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		dec := json.NewDecoder(r.Body)
 		dec.DisallowUnknownFields()
@@ -149,23 +139,19 @@ func MakeLoginHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Получаем пользователя по email
 		user, err := q.GetUserByEmail(ctx, req.Email)
 		if err != nil {
-			// Не раскрываем, что именно не так — просто отвечаем Unauthorized
 			logger.Info("login failed - user not found or db error", zap.String("email", req.Email), zap.Error(err))
 			writeError(w, http.StatusUnauthorized, "invalid credentials")
 			return
 		}
 
-		// Проверяем пароль
 		if err := auth.CheckPassword(user.Password, req.Password); err != nil {
 			logger.Info("login failed - invalid password", zap.String("email", req.Email))
 			writeError(w, http.StatusUnauthorized, "invalid credentials")
 			return
 		}
 
-		// Роли и токен
 		roles, err := q.GetRolesByUserId(ctx, user.ID)
 		if err != nil {
 			logger.Error("failed to get roles for login", zap.Int32("user_id", user.ID), zap.Error(err))
@@ -187,13 +173,12 @@ func MakeLoginHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 	}
 }
 
-// MakeMeHandler возвращает инфо о пользователе по claims из контекста
 func MakeMeHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		logger.Info("me request", zap.String("method", r.Method), zap.String("path", r.URL.Path))
-		// Извлекаем claims безопасно
 		val := r.Context().Value("claims")
 		if val == nil {
+			logger.Warn("missing claims in context")
 			writeError(w, http.StatusUnauthorized, "missing token claims")
 			return
 		}
@@ -204,7 +189,6 @@ func MakeMeHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 			return
 		}
 
-		// Аккуратно парсим user_id (поддерживаем float64 и т.д.)
 		var userID int32
 		if uidRaw, exists := claims["user_id"]; exists {
 			switch v := uidRaw.(type) {
@@ -219,8 +203,6 @@ func MakeMeHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 			case int64:
 				userID = int32(v)
 			case string:
-				// пытаемся распарсить строку в число
-				// (не импортируем strconv для простоты — можно добавить при необходимости)
 				logger.Warn("user_id is string in claims; unsupported parsing")
 				writeError(w, http.StatusUnauthorized, "invalid token claims")
 				return
@@ -229,6 +211,7 @@ func MakeMeHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 				return
 			}
 		} else {
+			logger.Warn("user_id not found in token claims")
 			writeError(w, http.StatusUnauthorized, "user_id not found in token")
 			return
 		}
@@ -236,7 +219,6 @@ func MakeMeHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 		ctx := r.Context()
 		user, err := q.GetUserById(ctx, userID)
 		if err != nil {
-			// Если пользователь не найден — 404, иначе 500
 			if errors.Is(err, sql.ErrNoRows) {
 				writeError(w, http.StatusNotFound, "user not found")
 				return
@@ -258,22 +240,24 @@ func MakeMeHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 	}
 }
 
-// MakeAssignRoleHandler назначает роль пользователю
 func MakeAssignRoleHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		logger.Info("assign role request", zap.String("method", r.Method), zap.String("path", r.URL.Path))
 		if r.Method != http.MethodPost {
+			logger.Warn("method not allowed", zap.String("handler", "assign_role"), zap.String("method", r.Method))
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 
 		parts := strings.Split(strings.TrimRight(r.URL.Path, "/"), "/")
 		if len(parts) < 4 || parts[1] != "users" || parts[3] != "roles" {
+			logger.Warn("invalid assign role path", zap.String("path", r.URL.Path))
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
 		userID64, err := strconv.ParseInt(parts[2], 10, 32)
 		if err != nil || userID64 <= 0 {
+			logger.Warn("invalid user id in path", zap.String("segment", parts[2]))
 			writeError(w, http.StatusBadRequest, "invalid user id")
 			return
 		}
@@ -281,6 +265,7 @@ func MakeAssignRoleHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 		val := r.Context().Value("claims")
 		claims, _ := val.(map[string]interface{})
 		if !claimsHasRole(claims, "admin") {
+			logger.Warn("forbidden: missing admin role", zap.Any("claims_roles", claims["roles"]))
 			writeError(w, http.StatusForbidden, "forbidden")
 			return
 		}
@@ -292,6 +277,7 @@ func MakeAssignRoleHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 			RoleID int32 `json:"role_id"`
 		}
 		if err := dec.Decode(&req); err != nil || req.RoleID <= 0 {
+			logger.Warn("invalid request body for assign role", zap.Error(err), zap.Int32("role_id", req.RoleID))
 			writeError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}

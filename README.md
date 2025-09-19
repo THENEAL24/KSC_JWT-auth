@@ -19,8 +19,8 @@ Minimal Go user service with JWT authentication, simple repository via sqlc, and
 - `go.uber.org/zap` (logging)
 - Docker Compose (Postgres)
 
-## Quick start
-1) Start Postgres
+## Quick start (Kubernetes with kind)
+1) Start Postgres locally (Docker Compose)
 ```bash
 docker compose up -d
 ```
@@ -30,16 +30,64 @@ docker compose up -d
 docker exec -i user-service-db psql -U postgres -d usersdb < migrations/20250915162552_init.sql
 ```
 
-3) Run service
+3) Create a local Kubernetes cluster with kind and map port 8080
 ```bash
-export JWT_SECRET=verysecret   # optional (defaults to devsecret)
-go run ./cmd/user-service
+kind create cluster --name user-service --config kind-config.yml
 ```
-Server listens on `:8080`.
+
+4) Build the Docker image and load it into kind
+```bash
+docker build -t user-service:latest .
+kind load docker-image user-service:latest --name user-service
+```
+
+5) Apply Kubernetes manifests
+```bash
+kubectl apply -f deploy/configmap.yml
+kubectl apply -f deploy/secret.yml
+kubectl apply -f deploy/deployment.yml
+kubectl apply -f deploy/service.yml
+```
+
+6) Wait until it's ready
+```bash
+kubectl get pods -w
+```
+
+The service is available at `http://localhost:8080` (`kind-config.yml` maps NodePort `30000` to host port 8080). If you use another access method (minikube tunnel/port-forward), adjust the URL accordingly.
 
 ## Environment
-- `JWT_SECRET` – HMAC secret for tokens (default: `devsecret`)
-- (Optional) `PORT`, `DATABASE_URL` – not wired by default; can be added easily
+- `JWT_SECRET` – HMAC secret for tokens (default: `devsecret`) — set in `deploy/secret.yml`
+- `PORT` – HTTP server port (default: `8080`) — set in `deploy/configmap.yml`
+- `DATABASE_URL` – Postgres DSN — by default `deploy/configmap.yml` uses `postgres://postgres:postgres@host.docker.internal:5432/usersdb?sslmode=disable`.
+
+Database notes:
+- With kind, `host.docker.internal` is typically reachable from cluster nodes (Docker Desktop on Windows/macOS). If DB connection fails, deploy Postgres inside the cluster or configure alternative access (e.g., Service/Endpoint or port-forwarding).
+
+## Kubernetes
+Main manifests in `deploy/`:
+- `configmap.yml` — app parameters (`PORT`, `DATABASE_URL`, etc.)
+- `secret.yml` — secrets (`JWT_SECRET`)
+- `deployment.yml` — `user-service` Deployment (port 8080, `/healthz` and `/readyz` probes)
+- `service.yml` — `NodePort` Service (30000 → 8080)
+
+Useful commands:
+```bash
+# Inspect resources
+kubectl get all
+
+# Pod logs
+kubectl logs deploy/user-service
+
+# Delete resources
+kubectl delete -f deploy/service.yml \
+  -f deploy/deployment.yml \
+  -f deploy/secret.yml \
+  -f deploy/configmap.yml
+
+# Delete kind cluster
+kind delete cluster --name user-service
+```
 
 ## API
 - POST `/register`
