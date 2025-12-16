@@ -4,15 +4,47 @@
 
 package db
 
+import (
+	"github.com/jackc/pgx/v5/pgtype"
+)
+
+type OauthAccount struct {
+	ID             int32
+	UserID         int32
+	Provider       string
+	ProviderUserID string
+	Email          string
+	Name           string
+	Picture        pgtype.Text
+	AccessToken    string
+	RefreshToken   pgtype.Text
+	CreatedAt      pgtype.Timestamp
+	UpdatedAt      pgtype.Timestamp
+	TokenExpiry    pgtype.Timestamp
+}
+
+type RefreshToken struct {
+	ID        int32
+	UserID    int32
+	Token     string
+	CreatedAt pgtype.Timestamp
+	ExpiresAt pgtype.Timestamp
+	Revoked   pgtype.Bool
+}
+
 type Role struct {
 	ID   int32
 	Name string
 }
 
 type User struct {
-	ID       int32
-	Email    string
-	Password string
+	ID            int32
+	Email         string
+	Password      pgtype.Text
+	AuthProvider  pgtype.Text
+	VerifiedEmail pgtype.Bool
+	Name          pgtype.Text
+	Picture       pgtype.Text
 }
 
 type UserRole struct {

@@ -7,10 +7,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 	"user-service/internal/auth"
 	"user-service/internal/db"
 
-	"github.com/jackc/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"go.uber.org/zap"
 )
 
@@ -29,13 +30,11 @@ func MakeRegisterHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 		logger.Info("register request", zap.String("method", r.Method), zap.String("path", r.URL.Path))
 
 		if r.Method != http.MethodPost {
-			logger.Warn("method not allowed", zap.String("handler", "register"), zap.String("method", r.Method))
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB
-
 		dec := json.NewDecoder(r.Body)
 		dec.DisallowUnknownFields()
 
@@ -44,19 +43,16 @@ func MakeRegisterHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 			Password string `json:"password"`
 		}
 		if err := dec.Decode(&req); err != nil {
-			logger.Warn("invalid json in register", zap.Error(err))
 			writeError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
 
 		req.Email = strings.TrimSpace(req.Email)
 		if req.Email == "" || !strings.Contains(req.Email, "@") {
-			logger.Warn("invalid email in register", zap.String("email", req.Email))
 			writeError(w, http.StatusBadRequest, "invalid email")
 			return
 		}
 		if len(req.Password) < 6 {
-			logger.Warn("password too short in register", zap.Int("length", len(req.Password)))
 			writeError(w, http.StatusBadRequest, "password too short (min 6 chars)")
 			return
 		}
@@ -72,53 +68,60 @@ func MakeRegisterHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 
 		user, err := q.CreateUser(ctx, db.CreateUserParams{
 			Email:    req.Email,
-			Password: hashed,
+			Password: pgtype.Text{String: hashed, Valid: true},
 		})
 		if err != nil {
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-				logger.Info("attempt to create duplicate user", zap.String("email", req.Email))
-				writeError(w, http.StatusConflict, "email already in use")
+			if strings.Contains(err.Error(), "duplicate key") {
+				writeError(w, http.StatusConflict, "user already exists")
 				return
 			}
-
-			if errors.Is(err, sql.ErrNoRows) {
-				logger.Error("create user returned no rows", zap.Error(err))
-				writeError(w, http.StatusInternalServerError, "internal error")
-				return
-			}
-
 			logger.Error("failed to create user", zap.Error(err))
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
 
 		roles, err := q.GetRolesByUserId(ctx, user.ID)
-		if err != nil {
-			logger.Error("failed to get roles for new user", zap.Int32("user_id", user.ID), zap.Error(err))
-			roles = []string{"user"}
-		}
-		if len(roles) == 0 {
+		if err != nil || len(roles) == 0 {
 			roles = []string{"user"}
 		}
 
-		token, err := auth.GenerateJWT(user.ID, roles)
+		accessToken, err := auth.GenerateJWT(user.ID, roles)
 		if err != nil {
-			logger.Error("failed to generate jwt", zap.Int32("user_id", user.ID), zap.Error(err))
+			logger.Error("failed to generate access token", zap.Error(err))
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
 
-		logger.Info("user registered", zap.Int32("id", user.ID), zap.String("email", user.Email))
-		writeJSON(w, http.StatusCreated, map[string]string{"token": token})
+		refreshToken, err := auth.GenerateJWT(user.ID, roles)
+		if err != nil {
+			logger.Error("failed to generate refresh token", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+
+		_, err = q.CreateRefreshToken(ctx, db.CreateRefreshTokenParams{
+			UserID:    user.ID,
+			Token:     refreshToken,
+			ExpiresAt: pgtype.Timestamp{Time: time.Now().Add(30 * 24 * time.Hour), Valid: true},
+		})
+		if err != nil {
+			logger.Error("failed to store refresh token", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, map[string]string{
+			"access_token":  accessToken,
+			"refresh_token": refreshToken,
+		})
 	}
 }
 
 func MakeLoginHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		logger.Info("login request", zap.String("method", r.Method), zap.String("path", r.URL.Path))
+
 		if r.Method != http.MethodPost {
-			logger.Warn("method not allowed", zap.String("handler", "login"), zap.String("method", r.Method))
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
@@ -132,7 +135,6 @@ func MakeLoginHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 			Password string `json:"password"`
 		}
 		if err := dec.Decode(&req); err != nil {
-			logger.Warn("invalid json in login", zap.Error(err))
 			writeError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
@@ -141,35 +143,51 @@ func MakeLoginHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 
 		user, err := q.GetUserByEmail(ctx, req.Email)
 		if err != nil {
-			logger.Info("login failed - user not found or db error", zap.String("email", req.Email), zap.Error(err))
 			writeError(w, http.StatusUnauthorized, "invalid credentials")
 			return
 		}
 
-		if err := auth.CheckPassword(user.Password, req.Password); err != nil {
-			logger.Info("login failed - invalid password", zap.String("email", req.Email))
+		if err := auth.CheckPassword(user.Password.String, req.Password); err != nil {
 			writeError(w, http.StatusUnauthorized, "invalid credentials")
 			return
 		}
 
 		roles, err := q.GetRolesByUserId(ctx, user.ID)
-		if err != nil {
-			logger.Error("failed to get roles for login", zap.Int32("user_id", user.ID), zap.Error(err))
-			roles = []string{"user"}
-		}
-		if len(roles) == 0 {
+		if err != nil || len(roles) == 0 {
 			roles = []string{"user"}
 		}
 
-		token, err := auth.GenerateJWT(user.ID, roles)
+		// 🎟 Генерация токенов
+		accessToken, err := auth.GenerateJWT(user.ID, roles)
 		if err != nil {
-			logger.Error("failed to generate jwt", zap.Int32("user_id", user.ID), zap.Error(err))
+			logger.Error("failed to generate access token", zap.Error(err))
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
 
-		logger.Info("user logged in", zap.Int32("id", user.ID), zap.String("email", user.Email))
-		writeJSON(w, http.StatusOK, map[string]string{"token": token})
+		refreshToken, err := auth.GenerateJWT(user.ID, roles)
+		if err != nil {
+			logger.Error("failed to generate refresh token", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+
+		// 💾 Сохраняем refresh token в БД
+		_, err = q.CreateRefreshToken(ctx, db.CreateRefreshTokenParams{
+			UserID:    user.ID,
+			Token:     refreshToken,
+			ExpiresAt: pgtype.Timestamp{Time: time.Now().Add(30 * 24 * time.Hour), Valid: true},
+		})
+		if err != nil {
+			logger.Error("failed to store refresh token", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]string{
+			"access_token":  accessToken,
+			"refresh_token": refreshToken,
+		})
 	}
 }
 
