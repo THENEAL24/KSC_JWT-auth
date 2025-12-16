@@ -7,6 +7,8 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const assignRole = `-- name: AssignRole :exec
@@ -25,6 +27,32 @@ func (q *Queries) AssignRole(ctx context.Context, arg AssignRoleParams) error {
 	return err
 }
 
+const createRefreshToken = `-- name: CreateRefreshToken :one
+INSERT INTO refresh_tokens (user_id, token, expires_at)
+VALUES ($1, $2, $3)
+RETURNING id, user_id, token, created_at, expires_at, revoked
+`
+
+type CreateRefreshTokenParams struct {
+	UserID    int32
+	Token     string
+	ExpiresAt pgtype.Timestamp
+}
+
+func (q *Queries) CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) (RefreshToken, error) {
+	row := q.db.QueryRow(ctx, createRefreshToken, arg.UserID, arg.Token, arg.ExpiresAt)
+	var i RefreshToken
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Token,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.Revoked,
+	)
+	return i, err
+}
+
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (email, password) VALUES ($1, $2)
 RETURNING id, email
@@ -32,7 +60,7 @@ RETURNING id, email
 
 type CreateUserParams struct {
 	Email    string
-	Password string
+	Password pgtype.Text
 }
 
 type CreateUserRow struct {
@@ -44,6 +72,36 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (CreateU
 	row := q.db.QueryRow(ctx, createUser, arg.Email, arg.Password)
 	var i CreateUserRow
 	err := row.Scan(&i.ID, &i.Email)
+	return i, err
+}
+
+const deleteExpiredTokens = `-- name: DeleteExpiredTokens :exec
+DELETE FROM refresh_tokens
+WHERE expires_at < NOW()
+`
+
+func (q *Queries) DeleteExpiredTokens(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, deleteExpiredTokens)
+	return err
+}
+
+const getRefreshTokenByToken = `-- name: GetRefreshTokenByToken :one
+SELECT id, user_id, token, created_at, expires_at, revoked
+FROM refresh_tokens
+WHERE token = $1 AND revoked = FALSE
+`
+
+func (q *Queries) GetRefreshTokenByToken(ctx context.Context, token string) (RefreshToken, error) {
+	row := q.db.QueryRow(ctx, getRefreshTokenByToken, token)
+	var i RefreshToken
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Token,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.Revoked,
+	)
 	return i, err
 }
 
@@ -78,21 +136,57 @@ const getUserByEmail = `-- name: GetUserByEmail :one
 SELECT id, email, password FROM users WHERE email = $1
 `
 
-func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
+type GetUserByEmailRow struct {
+	ID       int32
+	Email    string
+	Password pgtype.Text
+}
+
+func (q *Queries) GetUserByEmail(ctx context.Context, email string) (GetUserByEmailRow, error) {
 	row := q.db.QueryRow(ctx, getUserByEmail, email)
-	var i User
+	var i GetUserByEmailRow
 	err := row.Scan(&i.ID, &i.Email, &i.Password)
 	return i, err
 }
 
 const getUserById = `-- name: GetUserById :one
-SELECT id, email, password FROM users
+SELECT id, email, password, auth_provider, verified_email, name, picture FROM users
 WHERE id = $1
 `
 
 func (q *Queries) GetUserById(ctx context.Context, id int32) (User, error) {
 	row := q.db.QueryRow(ctx, getUserById, id)
 	var i User
-	err := row.Scan(&i.ID, &i.Email, &i.Password)
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.Password,
+		&i.AuthProvider,
+		&i.VerifiedEmail,
+		&i.Name,
+		&i.Picture,
+	)
 	return i, err
+}
+
+const revokeAllUserTokens = `-- name: RevokeAllUserTokens :exec
+UPDATE refresh_tokens
+SET revoked = TRUE
+WHERE user_id = $1 AND revoked = FALSE
+`
+
+func (q *Queries) RevokeAllUserTokens(ctx context.Context, userID int32) error {
+	_, err := q.db.Exec(ctx, revokeAllUserTokens, userID)
+	return err
+}
+
+const revokeRefreshToken = `-- name: RevokeRefreshToken :exec
+UPDATE refresh_tokens
+SET revoked = TRUE
+WHERE token = $1
+`
+
+func (q *Queries) RevokeRefreshToken(ctx context.Context, token string) error {
+	_, err := q.db.Exec(ctx, revokeRefreshToken, token)
+	return err
 }

@@ -10,3 +10,29 @@ services:
       POSTGRES_DB: usersdb
     ports:
       - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 5
+
+  app:
+    build: .
+    container_name: user-service-app
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: ${PORT:-8080}
+      DATABASE_URL: "postgres://postgres:postgres@db:5432/usersdb?sslmode=disable"
+      JWT_SECRET: ${JWT_SECRET:-supersecret}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-local}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-local}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8080/auth/google/callback}
+    ports:
+      - "${PORT:-8080}:${PORT:-8080}"
+
+volumes:
+  postgres_data:
