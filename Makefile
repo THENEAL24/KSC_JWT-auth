@@ -74,3 +74,8 @@ deploy-kind: kind-delete kind-create kind-load k8s-apply k8s-status
 connect:
 	@echo "🔗 Подключаюсь к приложению..."
 	kubectl port-forward svc/$(BINARY_NAME) $(PORT):$(PORT) -n $(K8S_NAMESPACE)
+
+start: 
+	docker-compose up -d
+	goose -dir $(MIGRATIONS_DIR) postgres "$(DATABASE_URL)" up
+	

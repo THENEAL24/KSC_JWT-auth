@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"time"
+	"os/signal"
+	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
@@ -17,6 +19,7 @@ import (
 	"user-service/internal/db"
 	appLogger "user-service/internal/logger"
 	"user-service/internal/server"
+	"user-service/internal/config"
 
 	"github.com/joho/godotenv"
 )
@@ -24,11 +27,16 @@ import (
 func main() {
 	ctx := context.Background()
 
+	cfg, err := config.LoadConfig("config/config.yml")
+    if err != nil {
+        log.Fatalf("Ошибка загрузки конфига: %v", err)
+    }
+
 	logger := appLogger.New()
 	defer logger.Sync()
 
 	godotenv.Load()
-	if err := auth.InitJWTSecret(); err != nil {
+	if err := auth.InitJWTSecret(cfg); err != nil {
 		logger.Fatal("failed to init JWT secret", zap.Error(err))
 	}
 
@@ -117,10 +125,31 @@ func main() {
 
 	logger.Info("starting server", zap.String("addr", addr))
 	srv := &http.Server{
-		Addr:         addr,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
-	log.Fatal(srv.ListenAndServe())
+        Addr:         addr,
+        Handler:      http.DefaultServeMux,
+        ReadTimeout:  15 * time.Second,
+        WriteTimeout: 15 * time.Second,
+        IdleTimeout:  60 * time.Second,
+    }
+	
+	quit := make(chan os.Signal, 1)
+    signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+    go func() {
+        log.Printf("Сервер слушает %s", addr)
+        if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+            log.Fatalf("Ошибка запуска сервера: %v", err)
+        }
+    }()
+
+    <-quit
+    log.Println("Получен сигнал завершения, выключение сервера...")
+
+    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+    if err := srv.Shutdown(ctx); err != nil {
+        log.Fatalf("Ошибка graceful shutdown: %v", err)
+    }
+
+    log.Println("Сервер успешно завершил работу")
 }
