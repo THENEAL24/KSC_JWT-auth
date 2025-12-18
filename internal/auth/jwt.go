@@ -8,19 +8,24 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/joho/godotenv"
+	"user-service/internal/config"
 )
 
 var jwtSecret []byte
+var accessTokenTTL time.Duration
 
-const accessTokenTTL = 15 * time.Minute
-
-func InitJWTSecret() error {
+func InitJWTSecret(cfg *config.Config) error {
 	_ = godotenv.Load()
 
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
 		secret = "devsecret"
 	}
+	ttl, err := time.ParseDuration(cfg.JWT.AccessTokenTTL)
+    if err != nil {
+        ttl = 15 * time.Minute
+    }
+    accessTokenTTL = ttl
 
 	jwtSecret = []byte(secret)
 	return nil

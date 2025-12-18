@@ -19,6 +19,7 @@ RUN apk add --no-cache ca-certificates
 COPY --from=builder /go/bin/goose /usr/local/bin/goose
 COPY --from=builder /app/user-service .
 COPY migrations ./migrations
+COPY .env.example .env
 
 EXPOSE 8080
 CMD ["./user-service"]

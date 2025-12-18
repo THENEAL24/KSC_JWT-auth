@@ -1,0 +1,8 @@
+server:
+  port: 8080
+
+jwt:
+  access_token_ttl: 15m
+
+database:
+  url: postgres://postgres:postgres@localhost:5432/usersdb?sslmode=disable
