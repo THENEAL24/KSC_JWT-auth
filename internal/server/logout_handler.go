@@ -53,14 +53,14 @@ func MakeLogoutHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 
 		var userID int32
 		switch v := rawID.(type) {
-		case float64:
-			userID = int32(v)
-		case int32:
-			userID = v
-		case int64:
-			userID = int32(v)
-		default:
-			writeError(w, http.StatusUnauthorized, "invalid refresh token")
+			case float64:
+				userID = int32(v)
+			case int32:
+				userID = v
+			case int64:
+				userID = int32(v)
+			default:
+				writeError(w, http.StatusUnauthorized, "invalid refresh token")
 			return
 		}
 
