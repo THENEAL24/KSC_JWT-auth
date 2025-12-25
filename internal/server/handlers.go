@@ -63,6 +63,25 @@ func MakeLoginHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 	}
 }
 
+func MakeLogoutHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		logger.Info("logout request",
+			zap.String("method", r.Method),
+			zap.String("path", r.URL.Path),
+		)
+
+		if r.Method != http.MethodPost {
+			logger.Warn("method not allowed", zap.String("handler", "logout"))
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		service.Logout(q, logger, w, r)
+
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 func MakeMeHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		logger.Info("me request", zap.String("method", r.Method), zap.String("path", r.URL.Path))
@@ -92,5 +111,27 @@ func MakeAssignRoleHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
 		service.AssignRole(q, logger, w, r)
 
 		writeJSON(w, http.StatusNoContent, nil)
+	}
+}
+
+func MakeRefreshHandler(q *db.Queries, logger *zap.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		logger.Info("refresh request",
+			zap.String("method", r.Method),
+			zap.String("path", r.URL.Path),
+		)
+
+		if r.Method != http.MethodPost {
+			logger.Warn("method not allowed", zap.String("handler", "refresh"))
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		accessToken, newRefreshToken := service.Refresh(q, logger, w, r)
+
+		writeJSON(w, http.StatusOK, map[string]string{
+			"access_token":  accessToken,
+			"refresh_token": newRefreshToken,
+		})
 	}
 }

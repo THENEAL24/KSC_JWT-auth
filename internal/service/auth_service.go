@@ -171,6 +171,81 @@ func Login(q *db.Queries, logger *zap.Logger, w http.ResponseWriter, r *http.Req
 	return accessToken, refreshToken
 }
 
+func Logout(q *db.Queries, logger *zap.Logger, w http.ResponseWriter, r *http.Request) {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		logger.Warn("missing authorization header in logout")
+		writeError(w, http.StatusUnauthorized, "missing refresh token")
+		return
+	}
+
+	tokenStr := authHeader
+	if strings.HasPrefix(strings.ToLower(tokenStr), "bearer ") {
+		tokenStr = strings.TrimSpace(tokenStr[7:])
+	}
+	
+	claims, err := auth.ParseJWT(tokenStr)
+	if err != nil {
+		logger.Warn("invalid refresh token on logout", zap.Error(err))
+		writeError(w, http.StatusUnauthorized, "invalid refresh token")
+		return
+	}
+
+	rawID, ok := claims["user_id"]
+	if !ok {
+		logger.Warn("user_id missing in refresh token claims")
+		writeError(w, http.StatusUnauthorized, "invalid refresh token")
+		return
+	}
+
+	var userID int32
+	switch v := rawID.(type) {
+		case float64:
+			userID = int32(v)
+		case int32:
+			userID = v
+		case int64:
+			userID = int32(v)
+		default:
+			writeError(w, http.StatusUnauthorized, "invalid refresh token")
+		return
+	}
+
+	ctx := r.Context()
+
+	ref, err := q.GetRefreshTokenByToken(ctx, tokenStr)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			logger.Warn("refresh token not found or already revoked",
+				zap.Int32("user_id", userID),
+			)
+			writeError(w, http.StatusUnauthorized, "invalid refresh token")
+			return
+		}
+		logger.Error("failed to load refresh token", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	if !ref.ExpiresAt.Valid || time.Now().After(ref.ExpiresAt.Time) {
+		logger.Info("refresh token expired",
+			zap.Int32("user_id", ref.UserID),
+		)
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	if err := q.RevokeRefreshToken(ctx, tokenStr); err != nil {
+		logger.Error("failed to revoke refresh token", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	logger.Info("user logged out",
+		zap.Int32("user_id", userID),
+	)
+}
+
 func Me(q *db.Queries, logger *zap.Logger, w http.ResponseWriter, r *http.Request) (int32, string) {
 	val := r.Context().Value("claims")
 	if val == nil {
@@ -227,7 +302,7 @@ func Me(q *db.Queries, logger *zap.Logger, w http.ResponseWriter, r *http.Reques
 	return user.ID, user.Email
 }
 
-func AssignRole(q *db.Queries, logger *zap.Logger, w http.ResponseWriter, r *http.Request) () {
+func AssignRole(q *db.Queries, logger *zap.Logger, w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimRight(r.URL.Path, "/"), "/")
 	if len(parts) < 4 || parts[1] != "users" || parts[3] != "roles" {
 		logger.Warn("invalid assign role path", zap.String("path", r.URL.Path))
@@ -267,6 +342,91 @@ func AssignRole(q *db.Queries, logger *zap.Logger, w http.ResponseWriter, r *htt
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+}
+
+func Refresh(q *db.Queries, logger *zap.Logger, w http.ResponseWriter, r *http.Request) (string, string) {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		writeError(w, http.StatusUnauthorized, "missing refresh token")
+		return "", ""
+	}
+
+	tokenStr := authHeader
+	if strings.HasPrefix(strings.ToLower(tokenStr), "bearer ") {
+		tokenStr = strings.TrimSpace(tokenStr[7:])
+	}
+
+	ref, err := q.GetRefreshTokenByToken(r.Context(), tokenStr)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			logger.Warn("refresh token not found or revoked")
+			writeError(w, http.StatusUnauthorized, "invalid refresh token")
+			return "", ""
+		}
+		logger.Error("failed to query refresh token", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return "", ""
+	}
+
+	if !ref.ExpiresAt.Valid || time.Now().After(ref.ExpiresAt.Time) {
+		logger.Info("refresh token expired",
+			zap.Int("refresh_token_id", int(ref.ID)),
+		)
+		_ = q.RevokeRefreshToken(r.Context(), tokenStr)
+		writeError(w, http.StatusUnauthorized, "refresh token expired")
+		return "", ""
+	}
+
+	ctx := r.Context()
+
+	user, err := q.GetUserById(ctx, ref.UserID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			writeError(w, http.StatusUnauthorized, "user not found")
+			return "", ""
+		}
+		logger.Error("failed to get user for refresh", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return "", ""
+	}
+
+	roles, err := q.GetRolesByUserId(ctx, user.ID)
+	if err != nil || len(roles) == 0 {
+		roles = []string{"user"}
+	}
+
+	accessToken, err := auth.GenerateJWT(user.ID, roles)
+	if err != nil {
+		logger.Error("failed to generate access token", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return "", ""
+	}
+
+	if err := q.RevokeRefreshToken(ctx, tokenStr); err != nil {
+		logger.Error("failed to revoke old refresh token", zap.Error(err))
+	}
+
+	newRefreshToken, err := auth.GenerateJWT(user.ID, roles)
+	if err != nil {
+		logger.Error("failed to generate new refresh token", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return "", ""
+	}
+
+	_, err = q.CreateRefreshToken(ctx, db.CreateRefreshTokenParams{
+		UserID: user.ID,
+		Token:  newRefreshToken,
+		ExpiresAt: pgtype.Timestamp{
+			Time:  time.Now().Add(30 * 24 * time.Hour),
+			Valid: true,
+		},
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return "", ""
+	}
+
+	return accessToken, newRefreshToken
 }
 
 func claimsHasRole(claims map[string]interface{}, role string) bool {
