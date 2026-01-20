@@ -1,10 +1,10 @@
-package auth
+package oauth
 
 import (
 	"context"
-	"os"
-	"io"
 	"encoding/json"
+	"io"
+	"os"
 
 	"github.com/google/uuid"
 	"golang.org/x/oauth2"
@@ -13,12 +13,12 @@ import (
 
 type GoogleUserInfo struct {
 	Sub           string `json:"sub"`
-	Email        string `json:"email"`
+	Email         string `json:"email"`
 	EmailVerified bool   `json:"email_verified"`
-	Name         string `json:"name"`
-	Picture      string `json:"picture"`
-	GivenName    string `json:"given_name"`
-	FamilyName   string `json:"family_name"`
+	Name          string `json:"name"`
+	Picture       string `json:"picture"`
+	GivenName     string `json:"given_name"`
+	FamilyName    string `json:"family_name"`
 }
 
 func NewGoogleOAuthConfig() *oauth2.Config {
@@ -38,7 +38,7 @@ func GenerateStateToken() (string, error) {
 	return uuid.New().String(), nil
 }
 
-func GetGoogleAuthURL(config *oauth2.Config, state string) string {
+func GoogleAuthURL(config *oauth2.Config, state string) string {
 	return config.AuthCodeURL(state, oauth2.AccessTypeOffline)
 }
 
@@ -46,7 +46,7 @@ func ExchangeCodeForToken(ctx context.Context, config *oauth2.Config, code strin
 	return config.Exchange(ctx, code)
 }
 
-func GetGoogleUserInfo(ctx context.Context, token *oauth2.Token) (*GoogleUserInfo, error) {
+func FetchGoogleUserInfo(ctx context.Context, token *oauth2.Token) (*GoogleUserInfo, error) {
 	client := oauth2.NewClient(ctx, oauth2.StaticTokenSource(token))
 
 	resp, err := client.Get("https://www.googleapis.com/oauth2/v3/userinfo")
