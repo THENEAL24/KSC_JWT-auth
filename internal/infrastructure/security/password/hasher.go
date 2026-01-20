@@ -1,4 +1,4 @@
-package auth
+package password
 
 import (
 	"github.com/jackc/pgx/v5/pgtype"

@@ -1,8 +1,25 @@
 server:
   port: 8080
-
-jwt:
-  access_token_ttl: 15m
+  read_timeout: 15s
+  write_timeout: 15s
+  idle_timeout: 60s
+  shutdown_timeout: 10s
 
 database:
-  url: postgres://postgres:postgres@localhost:5432/usersdb?sslmode=disable
+  host: localhost
+  port: 5432
+  user: postgres
+  password: postgres
+  database: usersdb
+  ssl_mode: disable
+
+jwt:
+  secret: "development-secret-key"
+  access_token_ttl: 15m
+  refresh_token_ttl: 720h
+
+oauth:
+  google:
+    client_id: ""
+    client_secret: ""
+    redirect_url: "http://localhost:8080/auth/google/callback"
